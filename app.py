@@ -9,9 +9,8 @@ from io import BytesIO
 
 app = Flask(__name__)
 
-OCR_API_KEY = os.environ.get("OCR_KEY", "K83152116788957")
+OCR_API_KEY = os.environ.get("OCR_KEY", "YOUR_OCR_SPACE_API_KEY")
 
-# ── Verhoeff ──────────────────────────────────────────────────
 D = [[0,1,2,3,4,5,6,7,8,9],[1,2,3,4,0,6,7,8,9,5],[2,3,4,0,1,7,8,9,5,6],
      [3,4,0,1,2,8,9,5,6,7],[4,0,1,2,3,9,5,6,7,8],[5,9,8,7,6,0,4,3,2,1],
      [6,5,9,8,7,1,0,4,3,2],[7,6,5,9,8,2,1,0,4,3],[8,7,6,5,9,3,2,1,0,4],
@@ -73,102 +72,89 @@ def run_ocr(compressed_bytes):
         "OCREngine":         "1"
     }
     response = requests.post("https://api.ocr.space/parse/image", data=params, timeout=30)
-    return response.json()
+    try:
+        result = response.json()
+        if isinstance(result, dict):
+            return result
+        return {"IsErroredOnProcessing": True, "ErrorMessage": str(result)}
+    except Exception as e:
+        return {"IsErroredOnProcessing": True, "ErrorMessage": str(e)}
 
-def parse_request_data():
+def parse_body():
     raw = request.get_data(as_text=True)
-
     if not raw:
         return {}
-
-    # Case 1: proper JSON dict
     try:
         parsed = json.loads(raw)
-        # Case 2: double encoded — parsed is a string
         if isinstance(parsed, str):
-            try:
-                parsed = json.loads(parsed)
-            except:
-                pass
+            parsed = json.loads(parsed)
         if isinstance(parsed, dict):
             return parsed
     except:
         pass
-
-    # Case 3: form data
     if request.form:
         return dict(request.form)
-
-    # Case 4: Zoho Map.toString() → {image_base64=..., aadhaar_number=...}
-    try:
-        cleaned   = raw.strip().strip('{}')
-        result    = {}
-        num_match = re.search(r'aadhaar_number=(\d+)', cleaned)
-        img_match = re.search(r'image_base64=(.+?)(?:,\s*aadhaar_number|$)', cleaned, re.DOTALL)
-        if num_match:
-            result['aadhaar_number'] = num_match.group(1).strip()
-        if img_match:
-            result['image_base64'] = img_match.group(1).strip()
-        if result:
-            return result
-    except:
-        pass
-
     return {}
 
 
 @app.route('/', methods=['GET'])
 def health():
-    return jsonify({"status": "ok", "service": "Aadhaar OCR + Compress"})
+    return jsonify({"status": "ok", "service": "Aadhaar OCR"})
 
 
 @app.route('/verify', methods=['POST'])
 def verify():
     try:
-        data = parse_request_data()
+        data = parse_body()
+        if not isinstance(data, dict):
+            data = {}
 
-        image_base64   = data.get("image_base64", "") if isinstance(data, dict) else ""
-        aadhaar_number = str(data.get("aadhaar_number", "") if isinstance(data, dict) else "").replace(" ","").replace("-","")
+        aadhaar_number = str(data.get("aadhaar_number", "")).replace(" ","").replace("-","")
+        file_url       = str(data.get("file_url", ""))
+        token          = str(data.get("token", ""))
 
-        if not image_base64:
-            return jsonify({"success":False,"match":False,"message":"image_base64 is required"}), 400
+        # ── Validations ───────────────────────────────────────
         if not aadhaar_number:
             return jsonify({"success":False,"match":False,"message":"aadhaar_number is required"}), 400
         if len(aadhaar_number) != 12 or not aadhaar_number.isdigit():
             return jsonify({"success":False,"match":False,"message":"Must be exactly 12 digits"}), 400
         if not verhoeff_validate(aadhaar_number):
             return jsonify({"success":False,"match":False,"message":"Invalid Aadhaar checksum"}), 400
+        if not file_url:
+            return jsonify({"success":False,"match":False,"message":"file_url is required"}), 400
 
-        if "," in image_base64:
-            image_base64 = image_base64.split(",")[1]
+        # ── Download image from Zoho ──────────────────────────
+        headers = {}
+        if token:
+            headers["Authorization"] = "Zoho-oauthtoken " + token
 
-        try:
-            image_bytes = base64.b64decode(image_base64)
-        except Exception as e:
-            return jsonify({"success":False,"match":False,"message":"Invalid base64: "+str(e)}), 400
+        download = requests.get(file_url, headers=headers, timeout=30)
+        if download.status_code != 200:
+            return jsonify({"success":False,"match":False,"message":"Could not download file from Zoho (status "+str(download.status_code)+")"}), 500
 
+        image_bytes = download.content
+
+        # ── Compress ──────────────────────────────────────────
         try:
             compressed = compress_image(image_bytes)
             del image_bytes
         except Exception as e:
             return jsonify({"success":False,"match":False,"message":"Compression failed: "+str(e)}), 500
 
-        try:
-            ocr_data = run_ocr(compressed)
-            del compressed
-        except Exception as e:
-            return jsonify({"success":False,"match":False,"message":"OCR call failed: "+str(e)}), 500
+        # ── OCR ───────────────────────────────────────────────
+        ocr_data = run_ocr(compressed)
+        del compressed
 
         if ocr_data.get("IsErroredOnProcessing"):
-            return jsonify({"success":False,"match":False,"message":"OCR error. Upload a clearer image."}), 200
+            return jsonify({"success":False,"match":False,"message":"OCR error: "+str(ocr_data.get("ErrorMessage",""))}), 200
 
-        parsed = ocr_data.get("ParsedResults", [])
-        if not parsed:
+        parsed_results = ocr_data.get("ParsedResults", [])
+        if not parsed_results:
             return jsonify({"success":False,"match":False,"message":"No text detected. Upload a clearer image."}), 200
 
-        full_text = " ".join([r.get("ParsedText","") for r in parsed])
+        full_text = " ".join([r.get("ParsedText","") for r in parsed_results if isinstance(r, dict)])
         if not full_text.strip():
-            return jsonify({"success":False,"match":False,"message":"No text detected. Upload a clearer image."}), 200
+            return jsonify({"success":False,"match":False,"message":"No text detected."}), 200
 
         numbers_found = extract_aadhaar_numbers(full_text)
         match         = aadhaar_number in numbers_found
