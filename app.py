@@ -72,19 +72,6 @@ def is_match(entered, numbers_found, clean_ocr_text):
     if entered in clean_ocr_text:
         return True
 
-    # Check 3: match with spaces stripped from Aadhaar
-    # Aadhaar cards show numbers in groups: "2984 8841 0388"
-    spaced = entered[0:4] + " " + entered[4:8] + " " + entered[8:12]
-    if spaced in clean_ocr_text.replace(" ",""):
-        return True
-
-    # Check 4: fuzzy — allow 1 digit difference
-    for found in numbers_found:
-        if len(found) == 12:
-            diff = sum(1 for a, b in zip(entered, found) if a != b)
-            if diff <= 1:
-                return True
-
     return False
 
 
