@@ -9,7 +9,7 @@ from io import BytesIO
 
 app = Flask(__name__)
 
-OCR_API_KEY = os.environ.get("OCR_KEY", "K83152116788957")
+OCR_API_KEY = os.environ.get("OCR_KEY", "YOUR_OCR_SPACE_API_KEY")
 
 D = [[0,1,2,3,4,5,6,7,8,9],[1,2,3,4,0,6,7,8,9,5],[2,3,4,0,1,7,8,9,5,6],
      [3,4,0,1,2,8,9,5,6,7],[4,0,1,2,3,9,5,6,7,8],[5,9,8,7,6,0,4,3,2,1],
@@ -84,80 +84,55 @@ def health():
     return jsonify({"status": "ok", "service": "Aadhaar OCR"})
 
 
-@app.route('/debug', methods=['POST'])
-def debug():
-    file_val = request.form.get("file", "")
-    return jsonify({
-        "form_keys":       list(request.form.keys()),
-        "file_keys":       list(request.files.keys()),
-        "file_val_length": len(file_val),
-        "file_val_preview": repr(file_val[:100]),
-        "files_count":     len(request.files),
-        "aadhaar_number":  request.form.get("aadhaar_number", ""),
-        "content_type":    request.content_type
-    })
-
-
 @app.route('/verify', methods=['POST'])
 def verify():
     try:
-        aadhaar_number = request.form.get("aadhaar_number", "").replace(" ","").replace("-","")
+        # ✅ Read aadhaar_number from query param
+        aadhaar_number = request.args.get("aadhaar_number", "").replace(" ","").replace("-","")
 
-        # ── Get file from request.files ───────────────────────
-        uploaded_file = None
-        if request.files:
-            uploaded_file = (
-                request.files.get("file") or
-                request.files.get("Upload_Aadhaar") or
-                list(request.files.values())[0]
-            )
+        # ✅ File arrives with key 'content' from Deluge files:
+        uploaded_file = (
+            request.files.get("content") or
+            request.files.get("file") or
+            request.files.get("Upload_Aadhaar") or
+            (list(request.files.values())[0] if request.files else None)
+        )
 
-        # ── Validations ───────────────────────────────────────
         if not aadhaar_number:
             return jsonify({"success":False,"match":False,
-                "message":"aadhaar_number required. form_keys="+str(list(request.form.keys()))+" file_keys="+str(list(request.files.keys()))}), 400
-
+                "message":"aadhaar_number missing. args="+str(dict(request.args))}), 400
         if len(aadhaar_number) != 12 or not aadhaar_number.isdigit():
-            return jsonify({"success":False,"match":False,"message":"Must be exactly 12 digits"}), 400
-
+            return jsonify({"success":False,"match":False,"message":"Must be 12 digits"}), 400
         if not verhoeff_validate(aadhaar_number):
             return jsonify({"success":False,"match":False,"message":"Invalid Aadhaar checksum"}), 400
-
         if not uploaded_file:
             return jsonify({"success":False,"match":False,
-                "message":"file required. form_keys="+str(list(request.form.keys()))+" file_keys="+str(list(request.files.keys()))}), 400
+                "message":"file missing. file_keys="+str(list(request.files.keys()))}), 400
 
-        # ── Read image bytes ──────────────────────────────────
         image_bytes = uploaded_file.read()
 
         if not image_bytes or len(image_bytes) < 100:
             return jsonify({"success":False,"match":False,
-                "message":"File is empty or too small: "+str(len(image_bytes))+" bytes"}), 400
+                "message":"File empty: "+str(len(image_bytes))+" bytes"}), 400
 
-        # ── Compress ──────────────────────────────────────────
         try:
             compressed = compress_image(image_bytes)
             del image_bytes
         except Exception as e:
             return jsonify({"success":False,"match":False,"message":"Compression failed: "+str(e)}), 500
 
-        # ── OCR ───────────────────────────────────────────────
         ocr_data = run_ocr(compressed)
         del compressed
 
         if ocr_data.get("IsErroredOnProcessing"):
             return jsonify({"success":False,"match":False,
-                "message":"OCR error: "+str(ocr_data.get("ErrorMessage","unknown"))}), 200
+                "message":"OCR error: "+str(ocr_data.get("ErrorMessage",""))}), 200
 
         parsed_results = ocr_data.get("ParsedResults", [])
         if not parsed_results:
-            return jsonify({"success":False,"match":False,"message":"No text detected. Upload a clearer image."}), 200
+            return jsonify({"success":False,"match":False,"message":"No text detected"}), 200
 
-        full_text = " ".join([r.get("ParsedText","") for r in parsed_results if isinstance(r, dict)])
-
-        if not full_text.strip():
-            return jsonify({"success":False,"match":False,"message":"No text detected. Upload a clearer image."}), 200
-
+        full_text     = " ".join([r.get("ParsedText","") for r in parsed_results if isinstance(r, dict)])
         numbers_found = extract_aadhaar_numbers(full_text)
         match         = aadhaar_number in numbers_found
 
