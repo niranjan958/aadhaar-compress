@@ -9,7 +9,7 @@ from io import BytesIO
 
 app = Flask(__name__)
 
-OCR_API_KEY = os.environ.get("OCR_KEY", "YOUR_OCR_SPACE_API_KEY")
+OCR_API_KEY = os.environ.get("OCR_KEY", "K83152116788957")
 
 D = [[0,1,2,3,4,5,6,7,8,9],[1,2,3,4,0,6,7,8,9,5],[2,3,4,0,1,7,8,9,5,6],
      [3,4,0,1,2,8,9,5,6,7],[4,0,1,2,3,9,5,6,7,8],[5,9,8,7,6,0,4,3,2,1],
