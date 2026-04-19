@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import base64
 import requests
 from flask import Flask, request, jsonify
@@ -74,49 +75,44 @@ def run_ocr(compressed_bytes):
     response = requests.post("https://api.ocr.space/parse/image", data=params, timeout=30)
     return response.json()
 
-def get_data_from_request():
-    """
-    Zoho Deluge invokeurl sends data in different formats.
-    This function handles all cases.
-    """
-    # Try JSON body first
-    json_data = request.get_json(force=True, silent=True)
-    if json_data:
-        return json_data
-
-    # Try form data
-    if request.form:
-        return request.form.to_dict()
-
-    # Try raw body and parse manually
+def parse_request_data():
     raw = request.get_data(as_text=True)
-    if raw:
-        # Try JSON parse
-        try:
-            import json
-            return json.loads(raw)
-        except:
-            pass
 
-        # Try parsing as key=value pairs (Zoho Map toString format)
-        # Zoho Map.toString() produces: {key1=value1, key2=value2}
-        try:
-            raw = raw.strip().strip('{}')
-            result = {}
-            # Split by comma but not commas inside base64
-            # base64 doesn't contain = outside of padding so split on ", " is safe
-            import re
-            # Find image_base64 value
-            img_match = re.search(r'image_base64=([^,}]+(?:,(?![a-z_])[^,}]+)*)', raw)
-            num_match = re.search(r'aadhaar_number=(\d+)', raw)
-            if img_match:
-                result['image_base64'] = img_match.group(1).strip()
-            if num_match:
-                result['aadhaar_number'] = num_match.group(1).strip()
-            if result:
-                return result
-        except:
-            pass
+    if not raw:
+        return {}
+
+    # Case 1: proper JSON dict
+    try:
+        parsed = json.loads(raw)
+        # Case 2: double encoded — parsed is a string
+        if isinstance(parsed, str):
+            try:
+                parsed = json.loads(parsed)
+            except:
+                pass
+        if isinstance(parsed, dict):
+            return parsed
+    except:
+        pass
+
+    # Case 3: form data
+    if request.form:
+        return dict(request.form)
+
+    # Case 4: Zoho Map.toString() → {image_base64=..., aadhaar_number=...}
+    try:
+        cleaned   = raw.strip().strip('{}')
+        result    = {}
+        num_match = re.search(r'aadhaar_number=(\d+)', cleaned)
+        img_match = re.search(r'image_base64=(.+?)(?:,\s*aadhaar_number|$)', cleaned, re.DOTALL)
+        if num_match:
+            result['aadhaar_number'] = num_match.group(1).strip()
+        if img_match:
+            result['image_base64'] = img_match.group(1).strip()
+        if result:
+            return result
+    except:
+        pass
 
     return {}
 
@@ -129,13 +125,10 @@ def health():
 @app.route('/verify', methods=['POST'])
 def verify():
     try:
-        data = get_data_from_request()
+        data = parse_request_data()
 
-        if not data:
-            return jsonify({"success":False,"match":False,"message":"No data received"}), 400
-
-        image_base64   = data.get("image_base64", "")
-        aadhaar_number = str(data.get("aadhaar_number", "")).replace(" ","").replace("-","")
+        image_base64   = data.get("image_base64", "") if isinstance(data, dict) else ""
+        aadhaar_number = str(data.get("aadhaar_number", "") if isinstance(data, dict) else "").replace(" ","").replace("-","")
 
         if not image_base64:
             return jsonify({"success":False,"match":False,"message":"image_base64 is required"}), 400
