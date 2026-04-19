@@ -6,7 +6,7 @@ import requests
 from flask import Flask, request, jsonify
 from PIL import Image
 from io import BytesIO
-
+ 
 app = Flask(__name__)
 
 OCR_API_KEY = os.environ.get("OCR_KEY", "K83152116788957")
