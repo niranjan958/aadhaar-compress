@@ -1,9 +1,0 @@
-services:
-  - type: web
-    name: aadhaar-ocr
-    runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
-    envVars:
-      - key: OCR_KEY
-        value: YOUR_OCR_SPACE_API_KEY
