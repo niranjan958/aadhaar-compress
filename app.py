@@ -20,7 +20,7 @@ def extract_aadhaar_numbers(text):
             candidate[0] not in ('0','1') and
             candidate not in found):
             found.append(candidate)
-    return found
+    return found, clean
 
 def compress_image(image_bytes):
     image = Image.open(BytesIO(image_bytes))
@@ -63,6 +63,30 @@ def run_ocr(compressed_bytes):
     except:
         return {"IsErroredOnProcessing": True}
 
+def is_match(entered, numbers_found, clean_ocr_text):
+    # Check 1: exact match in extracted numbers
+    if entered in numbers_found:
+        return True
+
+    # Check 2: direct substring in cleaned OCR digits
+    if entered in clean_ocr_text:
+        return True
+
+    # Check 3: match with spaces stripped from Aadhaar
+    # Aadhaar cards show numbers in groups: "2984 8841 0388"
+    spaced = entered[0:4] + " " + entered[4:8] + " " + entered[8:12]
+    if spaced in clean_ocr_text.replace(" ",""):
+        return True
+
+    # Check 4: fuzzy — allow 1 digit difference
+    for found in numbers_found:
+        if len(found) == 12:
+            diff = sum(1 for a, b in zip(entered, found) if a != b)
+            if diff <= 1:
+                return True
+
+    return False
+
 
 @app.route('/', methods=['GET'])
 def health():
@@ -72,10 +96,8 @@ def health():
 @app.route('/verify', methods=['POST'])
 def verify():
     try:
-        # aadhaar_number from query param
         aadhaar_number = request.args.get("aadhaar_number", "").replace(" ","").replace("-","")
 
-        # file arrives with key 'content' from Deluge
         uploaded_file = (
             request.files.get("content") or
             request.files.get("file") or
@@ -85,21 +107,18 @@ def verify():
 
         if not aadhaar_number:
             return jsonify({"success":False,"match":False,
-                "message":"aadhaar_number missing. args="+str(dict(request.args))}), 400
-
+                "message":"aadhaar_number missing"}), 400
         if len(aadhaar_number) != 12 or not aadhaar_number.isdigit():
             return jsonify({"success":False,"match":False,
                 "message":"Must be 12 digits. got="+aadhaar_number}), 400
-
         if not uploaded_file:
             return jsonify({"success":False,"match":False,
-                "message":"file missing. file_keys="+str(list(request.files.keys()))}), 400
+                "message":"file missing"}), 400
 
         image_bytes = uploaded_file.read()
-
         if not image_bytes or len(image_bytes) < 100:
             return jsonify({"success":False,"match":False,
-                "message":"File empty: "+str(len(image_bytes))+" bytes"}), 400
+                "message":"File empty"}), 400
 
         try:
             compressed = compress_image(image_bytes)
@@ -118,16 +137,16 @@ def verify():
         parsed_results = ocr_data.get("ParsedResults", [])
         if not parsed_results:
             return jsonify({"success":False,"match":False,
-                "message":"No text detected. Upload a clearer image."}), 200
+                "message":"No text detected"}), 200
 
         full_text = " ".join([r.get("ParsedText","") for r in parsed_results if isinstance(r, dict)])
 
         if not full_text.strip():
             return jsonify({"success":False,"match":False,
-                "message":"No text detected. Upload a clearer image."}), 200
+                "message":"No text detected"}), 200
 
-        numbers_found = extract_aadhaar_numbers(full_text)
-        match         = aadhaar_number in numbers_found
+        numbers_found, clean_ocr = extract_aadhaar_numbers(full_text)
+        match = is_match(aadhaar_number, numbers_found, clean_ocr)
 
         return jsonify({
             "success":       True,
