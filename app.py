@@ -11,20 +11,6 @@ app = Flask(__name__)
 
 OCR_API_KEY = os.environ.get("OCR_KEY", "K83152116788957")
 
-D = [[0,1,2,3,4,5,6,7,8,9],[1,2,3,4,0,6,7,8,9,5],[2,3,4,0,1,7,8,9,5,6],
-     [3,4,0,1,2,8,9,5,6,7],[4,0,1,2,3,9,5,6,7,8],[5,9,8,7,6,0,4,3,2,1],
-     [6,5,9,8,7,1,0,4,3,2],[7,6,5,9,8,2,1,0,4,3],[8,7,6,5,9,3,2,1,0,4],
-     [9,8,7,6,5,4,3,2,1,0]]
-P = [[0,1,2,3,4,5,6,7,8,9],[1,5,7,6,2,8,3,0,9,4],[5,8,0,3,7,9,6,1,4,2],
-     [8,9,1,6,0,4,3,5,2,7],[9,4,5,3,1,2,6,8,7,0],[4,2,8,6,5,7,3,9,0,1],
-     [2,7,9,3,8,0,6,4,1,5],[7,0,4,6,9,1,3,2,5,8]]
-
-def verhoeff_validate(number):
-    c = 0
-    for i, digit in enumerate(reversed(number)):
-        c = D[c][P[i % 8][int(digit)]]
-    return c == 0
-
 def extract_aadhaar_numbers(text):
     clean = re.sub(r'[^0-9]', '', text)
     found = []
@@ -32,7 +18,6 @@ def extract_aadhaar_numbers(text):
         candidate = clean[i:i+12]
         if (len(candidate) == 12 and
             candidate[0] not in ('0','1') and
-            verhoeff_validate(candidate) and
             candidate not in found):
             found.append(candidate)
     return found
@@ -87,10 +72,10 @@ def health():
 @app.route('/verify', methods=['POST'])
 def verify():
     try:
-        # ✅ Read aadhaar_number from query param
+        # aadhaar_number from query param
         aadhaar_number = request.args.get("aadhaar_number", "").replace(" ","").replace("-","")
 
-        # ✅ File arrives with key 'content' from Deluge files:
+        # file arrives with key 'content' from Deluge
         uploaded_file = (
             request.files.get("content") or
             request.files.get("file") or
@@ -101,10 +86,11 @@ def verify():
         if not aadhaar_number:
             return jsonify({"success":False,"match":False,
                 "message":"aadhaar_number missing. args="+str(dict(request.args))}), 400
+
         if len(aadhaar_number) != 12 or not aadhaar_number.isdigit():
-            return jsonify({"success":False,"match":False,"message":"Must be 12 digits"}), 400
-        if not verhoeff_validate(aadhaar_number):
-            return jsonify({"success":False,"match":False,"message":"Invalid Aadhaar checksum"}), 400
+            return jsonify({"success":False,"match":False,
+                "message":"Must be 12 digits. got="+aadhaar_number}), 400
+
         if not uploaded_file:
             return jsonify({"success":False,"match":False,
                 "message":"file missing. file_keys="+str(list(request.files.keys()))}), 400
@@ -119,7 +105,8 @@ def verify():
             compressed = compress_image(image_bytes)
             del image_bytes
         except Exception as e:
-            return jsonify({"success":False,"match":False,"message":"Compression failed: "+str(e)}), 500
+            return jsonify({"success":False,"match":False,
+                "message":"Compression failed: "+str(e)}), 500
 
         ocr_data = run_ocr(compressed)
         del compressed
@@ -130,9 +117,15 @@ def verify():
 
         parsed_results = ocr_data.get("ParsedResults", [])
         if not parsed_results:
-            return jsonify({"success":False,"match":False,"message":"No text detected"}), 200
+            return jsonify({"success":False,"match":False,
+                "message":"No text detected. Upload a clearer image."}), 200
 
-        full_text     = " ".join([r.get("ParsedText","") for r in parsed_results if isinstance(r, dict)])
+        full_text = " ".join([r.get("ParsedText","") for r in parsed_results if isinstance(r, dict)])
+
+        if not full_text.strip():
+            return jsonify({"success":False,"match":False,
+                "message":"No text detected. Upload a clearer image."}), 200
+
         numbers_found = extract_aadhaar_numbers(full_text)
         match         = aadhaar_number in numbers_found
 
@@ -145,7 +138,8 @@ def verify():
         })
 
     except Exception as e:
-        return jsonify({"success":False,"match":False,"message":"Server error: "+str(e)}), 500
+        return jsonify({"success":False,"match":False,
+            "message":"Server error: "+str(e)}), 500
 
 
 if __name__ == '__main__':
