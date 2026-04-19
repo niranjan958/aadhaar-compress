@@ -78,46 +78,6 @@ def run_ocr(compressed_bytes):
     except:
         return {"IsErroredOnProcessing": True}
 
-def get_image_bytes():
-    """
-    Deluge sends file as form field string — not as file upload.
-    form_keys=['aadhaar_number', 'file'], file_keys=[]
-    So read from request.form.get("file")
-    """
-    # ── Try form string field (what Deluge actually sends) ────
-    for key in ["file", "Upload_Aadhaar", "upload_aadhaar", "image"]:
-        val = request.form.get(key, "")
-        if val:
-            # Could be raw bytes string or base64
-            try:
-                # Try decoding as base64 first
-                decoded = base64.b64decode(val)
-                return decoded
-            except:
-                # Try as raw string bytes
-                try:
-                    return val.encode('latin-1')
-                except:
-                    pass
-
-    # ── Try request.files just in case ───────────────────────
-    for key in ["file", "Upload_Aadhaar", "upload_aadhaar", "image"]:
-        f = request.files.get(key)
-        if f:
-            return f.read()
-
-    if request.files:
-        return list(request.files.values())[0].read()
-
-    return None
-
-def get_aadhaar_number():
-    for key in ["aadhaar_number", "Aadhaar_Number", "aadhaar"]:
-        val = request.form.get(key, "")
-        if val:
-            return val.replace(" ","").replace("-","")
-    return ""
-
 
 @app.route('/', methods=['GET'])
 def health():
@@ -126,49 +86,78 @@ def health():
 
 @app.route('/debug', methods=['POST'])
 def debug():
-    file_val = request.form.get("file","")
+    file_val = request.form.get("file", "")
     return jsonify({
-        "form_keys":        list(request.form.keys()),
-        "file_keys":        list(request.files.keys()),
-        "file_val_length":  len(file_val),
-        "file_val_preview": file_val[:100] if file_val else "",
-        "aadhaar_number":   request.form.get("aadhaar_number",""),
-        "content_type":     request.content_type
+        "form_keys":       list(request.form.keys()),
+        "file_keys":       list(request.files.keys()),
+        "file_val_length": len(file_val),
+        "file_val_preview": repr(file_val[:100]),
+        "files_count":     len(request.files),
+        "aadhaar_number":  request.form.get("aadhaar_number", ""),
+        "content_type":    request.content_type
     })
 
 
 @app.route('/verify', methods=['POST'])
 def verify():
     try:
-        aadhaar_number = get_aadhaar_number()
-        image_bytes    = get_image_bytes()
+        aadhaar_number = request.form.get("aadhaar_number", "").replace(" ","").replace("-","")
 
+        # ── Get file from request.files ───────────────────────
+        uploaded_file = None
+        if request.files:
+            uploaded_file = (
+                request.files.get("file") or
+                request.files.get("Upload_Aadhaar") or
+                list(request.files.values())[0]
+            )
+
+        # ── Validations ───────────────────────────────────────
         if not aadhaar_number:
-            return jsonify({"success":False,"match":False,"message":"aadhaar_number required"}), 400
+            return jsonify({"success":False,"match":False,
+                "message":"aadhaar_number required. form_keys="+str(list(request.form.keys()))+" file_keys="+str(list(request.files.keys()))}), 400
+
         if len(aadhaar_number) != 12 or not aadhaar_number.isdigit():
-            return jsonify({"success":False,"match":False,"message":"Must be 12 digits"}), 400
+            return jsonify({"success":False,"match":False,"message":"Must be exactly 12 digits"}), 400
+
         if not verhoeff_validate(aadhaar_number):
             return jsonify({"success":False,"match":False,"message":"Invalid Aadhaar checksum"}), 400
-        if not image_bytes:
-            return jsonify({"success":False,"match":False,"message":"file required"}), 400
 
+        if not uploaded_file:
+            return jsonify({"success":False,"match":False,
+                "message":"file required. form_keys="+str(list(request.form.keys()))+" file_keys="+str(list(request.files.keys()))}), 400
+
+        # ── Read image bytes ──────────────────────────────────
+        image_bytes = uploaded_file.read()
+
+        if not image_bytes or len(image_bytes) < 100:
+            return jsonify({"success":False,"match":False,
+                "message":"File is empty or too small: "+str(len(image_bytes))+" bytes"}), 400
+
+        # ── Compress ──────────────────────────────────────────
         try:
             compressed = compress_image(image_bytes)
             del image_bytes
         except Exception as e:
             return jsonify({"success":False,"match":False,"message":"Compression failed: "+str(e)}), 500
 
+        # ── OCR ───────────────────────────────────────────────
         ocr_data = run_ocr(compressed)
         del compressed
 
         if ocr_data.get("IsErroredOnProcessing"):
-            return jsonify({"success":False,"match":False,"message":"OCR error: "+str(ocr_data.get("ErrorMessage",""))}), 200
+            return jsonify({"success":False,"match":False,
+                "message":"OCR error: "+str(ocr_data.get("ErrorMessage","unknown"))}), 200
 
         parsed_results = ocr_data.get("ParsedResults", [])
         if not parsed_results:
-            return jsonify({"success":False,"match":False,"message":"No text detected"}), 200
+            return jsonify({"success":False,"match":False,"message":"No text detected. Upload a clearer image."}), 200
 
-        full_text     = " ".join([r.get("ParsedText","") for r in parsed_results if isinstance(r, dict)])
+        full_text = " ".join([r.get("ParsedText","") for r in parsed_results if isinstance(r, dict)])
+
+        if not full_text.strip():
+            return jsonify({"success":False,"match":False,"message":"No text detected. Upload a clearer image."}), 200
+
         numbers_found = extract_aadhaar_numbers(full_text)
         match         = aadhaar_number in numbers_found
 
