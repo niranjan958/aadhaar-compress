@@ -1,15 +1,29 @@
 import os
 import re
-import json
 import base64
+import datetime
 import requests
 from flask import Flask, request, jsonify
 from PIL import Image
 from io import BytesIO
- 
+
 app = Flask(__name__)
 
-OCR_API_KEY = os.environ.get("OCR_KEY", "K83152116788957")
+# ── 3 OCR keys — rotates automatically ───────────────────────
+OCR_KEYS = [
+    os.environ.get("OCR_KEY_1", "K83552913688957"),
+    os.environ.get("OCR_KEY_2", "K83152116788957"),
+    os.environ.get("OCR_KEY_3", "K86520073288957"),
+]
+
+def get_ocr_key():
+    day = datetime.datetime.now().day
+    if day <= 10:
+        return OCR_KEYS[0]
+    elif day <= 20:
+        return OCR_KEYS[1]
+    else:
+        return OCR_KEYS[2]
 
 def extract_aadhaar_numbers(text):
     clean = re.sub(r'[^0-9]', '', text)
@@ -47,7 +61,7 @@ def compress_image(image_bytes):
 def run_ocr(compressed_bytes):
     img_b64 = base64.b64encode(compressed_bytes).decode("utf-8")
     params  = {
-        "apikey":            OCR_API_KEY,
+        "apikey":            get_ocr_key(),
         "base64Image":       "data:image/jpeg;base64," + img_b64,
         "language":          "eng",
         "isOverlayRequired": "false",
@@ -67,24 +81,28 @@ def is_match(entered, numbers_found, clean_ocr_text):
     # Check 1: exact match in extracted numbers
     if entered in numbers_found:
         return True
-
     # Check 2: direct substring in cleaned OCR digits
     if entered in clean_ocr_text:
         return True
-
     return False
 
 
 @app.route('/', methods=['GET'])
 def health():
-    return jsonify({"status": "ok", "service": "Aadhaar OCR"})
+    return jsonify({
+        "status":      "ok",
+        "service":     "Aadhaar OCR",
+        "active_key":  "key" + str(1 if datetime.datetime.now().day <= 10 else 2 if datetime.datetime.now().day <= 20 else 3)
+    })
 
 
 @app.route('/verify', methods=['POST'])
 def verify():
     try:
+        # aadhaar_number from query param
         aadhaar_number = request.args.get("aadhaar_number", "").replace(" ","").replace("-","")
 
+        # file arrives with key 'content' from Deluge files:
         uploaded_file = (
             request.files.get("content") or
             request.files.get("file") or
@@ -100,12 +118,13 @@ def verify():
                 "message":"Must be 12 digits. got="+aadhaar_number}), 400
         if not uploaded_file:
             return jsonify({"success":False,"match":False,
-                "message":"file missing"}), 400
+                "message":"file missing. file_keys="+str(list(request.files.keys()))}), 400
 
         image_bytes = uploaded_file.read()
+
         if not image_bytes or len(image_bytes) < 100:
             return jsonify({"success":False,"match":False,
-                "message":"File empty"}), 400
+                "message":"File empty: "+str(len(image_bytes))+" bytes"}), 400
 
         try:
             compressed = compress_image(image_bytes)
@@ -124,13 +143,13 @@ def verify():
         parsed_results = ocr_data.get("ParsedResults", [])
         if not parsed_results:
             return jsonify({"success":False,"match":False,
-                "message":"No text detected"}), 200
+                "message":"No text detected. Upload a clearer image."}), 200
 
         full_text = " ".join([r.get("ParsedText","") for r in parsed_results if isinstance(r, dict)])
 
         if not full_text.strip():
             return jsonify({"success":False,"match":False,
-                "message":"No text detected"}), 200
+                "message":"No text detected. Upload a clearer image."}), 200
 
         numbers_found, clean_ocr = extract_aadhaar_numbers(full_text)
         match = is_match(aadhaar_number, numbers_found, clean_ocr)
