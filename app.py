@@ -9,7 +9,6 @@ from io import BytesIO
 
 app = Flask(__name__)
 
-# ── 3 OCR keys — rotates automatically ───────────────────────
 OCR_KEYS = [
     os.environ.get("OCR_KEY_1", "K83552913688957"),
     os.environ.get("OCR_KEY_2", "K83152116788957"),
@@ -58,16 +57,25 @@ def compress_image(image_bytes):
     output.seek(0)
     return output.read()
 
-def run_ocr(compressed_bytes):
+def is_pdf(file_bytes):
+    return file_bytes[:4] == b'%PDF'
+
+def run_ocr(compressed_bytes, filetype="jpg"):
     img_b64 = base64.b64encode(compressed_bytes).decode("utf-8")
-    params  = {
+
+    if filetype == "pdf":
+        data_uri = "data:application/pdf;base64," + img_b64
+    else:
+        data_uri = "data:image/jpeg;base64," + img_b64
+
+    params = {
         "apikey":            get_ocr_key(),
-        "base64Image":       "data:image/jpeg;base64," + img_b64,
+        "base64Image":       data_uri,
         "language":          "eng",
         "isOverlayRequired": "false",
         "detectOrientation": "true",
         "scale":             "true",
-        "filetype":          "jpg",
+        "filetype":          filetype,
         "OCREngine":         "1"
     }
     response = requests.post("https://api.ocr.space/parse/image", data=params, timeout=30)
@@ -78,10 +86,8 @@ def run_ocr(compressed_bytes):
         return {"IsErroredOnProcessing": True}
 
 def is_match(entered, numbers_found, clean_ocr_text):
-    # Check 1: exact match in extracted numbers
     if entered in numbers_found:
         return True
-    # Check 2: direct substring in cleaned OCR digits
     if entered in clean_ocr_text:
         return True
     return False
@@ -90,19 +96,17 @@ def is_match(entered, numbers_found, clean_ocr_text):
 @app.route('/', methods=['GET'])
 def health():
     return jsonify({
-        "status":      "ok",
-        "service":     "Aadhaar OCR",
-        "active_key":  "key" + str(1 if datetime.datetime.now().day <= 10 else 2 if datetime.datetime.now().day <= 20 else 3)
+        "status":     "ok",
+        "service":    "Aadhaar OCR",
+        "active_key": "key" + str(1 if datetime.datetime.now().day <= 10 else 2 if datetime.datetime.now().day <= 20 else 3)
     })
 
 
 @app.route('/verify', methods=['POST'])
 def verify():
     try:
-        # aadhaar_number from query param
         aadhaar_number = request.args.get("aadhaar_number", "").replace(" ","").replace("-","")
 
-        # file arrives with key 'content' from Deluge files:
         uploaded_file = (
             request.files.get("content") or
             request.files.get("file") or
@@ -118,23 +122,47 @@ def verify():
                 "message":"Must be 12 digits. got="+aadhaar_number}), 400
         if not uploaded_file:
             return jsonify({"success":False,"match":False,
-                "message":"file missing. file_keys="+str(list(request.files.keys()))}), 400
+                "message":"file missing"}), 400
 
         image_bytes = uploaded_file.read()
 
         if not image_bytes or len(image_bytes) < 100:
             return jsonify({"success":False,"match":False,
-                "message":"File empty: "+str(len(image_bytes))+" bytes"}), 400
+                "message":"File empty"}), 400
 
-        try:
-            compressed = compress_image(image_bytes)
-            del image_bytes
-        except Exception as e:
-            return jsonify({"success":False,"match":False,
-                "message":"Compression failed: "+str(e)}), 500
+        # ── Detect file type ──────────────────────────────
+        if is_pdf(image_bytes):
+            # ── PDF — send directly to OCR.space ─────────
+            # OCR.space free supports PDFs up to 1MB
+            # Compress if over 700KB — convert first page to image
+            if len(image_bytes) > 700 * 1024:
+                try:
+                    from pdf2image import convert_from_bytes
+                    pages       = convert_from_bytes(image_bytes, first_page=1, last_page=1, dpi=150)
+                    first_page  = pages[0]
+                    buf         = BytesIO()
+                    first_page.save(buf, format="JPEG", quality=85)
+                    buf.seek(0)
+                    image_bytes = buf.read()
+                    filetype    = "jpg"
+                except Exception:
+                    # If pdf2image not available, send PDF as-is
+                    filetype = "pdf"
+            else:
+                filetype = "pdf"
 
-        ocr_data = run_ocr(compressed)
-        del compressed
+            ocr_data = run_ocr(image_bytes, filetype=filetype)
+
+        else:
+            # ── Image (JPG/PNG) — compress then OCR ──────
+            try:
+                compressed  = compress_image(image_bytes)
+                del image_bytes
+            except Exception as e:
+                return jsonify({"success":False,"match":False,
+                    "message":"Compression failed: "+str(e)}), 500
+
+            ocr_data = run_ocr(compressed, filetype="jpg")
 
         if ocr_data.get("IsErroredOnProcessing"):
             return jsonify({"success":False,"match":False,
@@ -143,13 +171,13 @@ def verify():
         parsed_results = ocr_data.get("ParsedResults", [])
         if not parsed_results:
             return jsonify({"success":False,"match":False,
-                "message":"No text detected. Upload a clearer image."}), 200
+                "message":"No text detected"}), 200
 
         full_text = " ".join([r.get("ParsedText","") for r in parsed_results if isinstance(r, dict)])
 
         if not full_text.strip():
             return jsonify({"success":False,"match":False,
-                "message":"No text detected. Upload a clearer image."}), 200
+                "message":"No text detected"}), 200
 
         numbers_found, clean_ocr = extract_aadhaar_numbers(full_text)
         match = is_match(aadhaar_number, numbers_found, clean_ocr)
