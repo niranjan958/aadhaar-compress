@@ -11,7 +11,7 @@ app = Flask(__name__)
 
 OCR_KEYS = [
     os.environ.get("OCR_KEY_1", "K83552913688957"),
-    os.environ.get("OCR_KEY_2", "K83152116788957"),
+    os.environ.get("OCR_KEY_2", "K83152116788917"),
     os.environ.get("OCR_KEY_3", "K86520073288957"),
 ]
 
